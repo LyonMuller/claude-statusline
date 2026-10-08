@@ -37,6 +37,29 @@ function getGitSegment(dir) {
   return ` \x1b[2m│\x1b[0m \x1b[36m${branch}\x1b[0m${status}`;
 }
 
+// Context meter thresholds, in % of the real context window.
+const CTX_WARN_PCT = 20;
+const CTX_ACT_PCT = 35;
+const CTX_DUMB_PCT = 50;
+// Cache alerts: warn this many seconds before expiry; ignore cold caches below this size.
+const CACHE_WARN_SECONDS = 300;
+const CACHE_COLD_MIN_TOKENS = 50_000;
+
+// Shown only when it matters: cache about to expire, or already cold with a big
+// context (the next message re-pays the whole context at the cache-write rate).
+function getCacheAlert(cache) {
+  if (!cache || !cache.caching_observed || !cache.expires_at) return '';
+  const left = cache.expires_at - Date.now() / 1000;
+  if (left > 0 && left <= CACHE_WARN_SECONDS) {
+    return `\x1b[33mcache esfria em ${Math.max(1, Math.ceil(left / 60))}min\x1b[0m`;
+  }
+  const tokens = cache.recache_tokens_if_cold || 0;
+  if (left <= 0 && tokens >= CACHE_COLD_MIN_TOKENS) {
+    return `\x1b[33mcache frio · ${Math.round(tokens / 1000)}k a repagar\x1b[0m`;
+  }
+  return '';
+}
+
 function formatCost(costUsd) {
   if (costUsd == null) return '';
   const val = costUsd < 0.01 && costUsd > 0 ? costUsd.toFixed(4) : costUsd.toFixed(2);
@@ -62,31 +85,32 @@ process.stdin.on('end', () => {
     const model = data.model?.display_name || 'Claude';
     const dir = data.workspace?.current_dir || process.cwd();
     const session = data.session_id || '';
-    const remaining = data.context_window?.remaining_percentage;
+    const ctxWin = data.context_window;
+    const rawUsed = ctxWin?.used_percentage ?? (ctxWin?.remaining_percentage != null ? 100 - ctxWin.remaining_percentage : null);
 
-    const totalCtx = data.context_window?.total_tokens || 1_000_000;
-    const acw = parseInt(process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW || '0', 10);
-    const AUTO_COMPACT_BUFFER_PCT = acw > 0
-      ? Math.min(100, (acw / totalCtx) * 100)
-      : 16.5;
-
+    // Real share of the context window in use. Thresholds warn early: cache
+    // reads cost more per turn as the context grows, and quality drops past ~50%.
     let ctx = '';
-    if (remaining != null) {
-      const usableRemaining = Math.max(0, ((remaining - AUTO_COMPACT_BUFFER_PCT) / (100 - AUTO_COMPACT_BUFFER_PCT)) * 100);
-      const used = Math.max(0, Math.min(100, Math.round(100 - usableRemaining)));
+    if (rawUsed != null) {
+      const used = Math.max(0, Math.min(100, Math.round(rawUsed)));
       const filled = Math.floor(used / 10);
       const bar = '█'.repeat(filled) + '░'.repeat(10 - filled);
+      const hint = text => ` \x1b[2m${text}\x1b[0m`;
 
-      if (used < 50) {
+      if (used < CTX_WARN_PCT) {
         ctx = `\x1b[32m${bar} ${used}%\x1b[0m`;
-      } else if (used < 65) {
-        ctx = `\x1b[33m${bar} ${used}%\x1b[0m`;
-      } else if (used < 80) {
-        ctx = `\x1b[38;5;208m${bar} ${used}%\x1b[0m`;
+      } else if (used < CTX_ACT_PCT) {
+        ctx = `\x1b[33m${bar} ${used}%\x1b[0m${hint('considere /compact')}`;
+      } else if (used < CTX_DUMB_PCT) {
+        ctx = `\x1b[38;5;208m${bar} ${used}%\x1b[0m${hint('/compact ou /clear')}`;
       } else {
-        ctx = `\x1b[5;31m💀 ${bar} ${used}%\x1b[0m`;
+        ctx = `\x1b[5;31m💀 ${bar} ${used}%\x1b[0m${hint('/clear (antes /handoff)')}`;
       }
     }
+
+    const effort = data.effort?.level;
+    const effortSeg = effort ? ` \x1b[2m${effort}\x1b[0m` : '';
+    const cacheSeg = getCacheAlert(data.prompt_cache);
 
     let task = '';
     const homeDir = os.homedir();
@@ -110,7 +134,7 @@ process.stdin.on('end', () => {
     }
 
     const dirname = path.basename(dir);
-    const modelSeg = `\x1b[2m${model}\x1b[0m`;
+    const modelSeg = `\x1b[2m${model}\x1b[0m${effortSeg}`;
     const dirSeg = `\x1b[2m${dirname}\x1b[0m`;
     const middle = task ? ` \x1b[2m│\x1b[0m \x1b[1m${task}\x1b[0m` : '';
     const gitSeg = getGitSegment(dir);
@@ -122,7 +146,7 @@ process.stdin.on('end', () => {
     const linesSeg = formatLinesChanged(linesAdded, linesRemoved);
 
     const line1 = `${modelSeg}${middle} \x1b[2m│\x1b[0m ${dirSeg}${gitSeg}`;
-    const line2Parts = [ctx, costSeg.replace(/^ \x1b\[2m│\x1b\[0m /, ''), linesSeg.replace(/^ \x1b\[2m│\x1b\[0m /, '')]
+    const line2Parts = [ctx, costSeg.replace(/^ \x1b\[2m│\x1b\[0m /, ''), linesSeg.replace(/^ \x1b\[2m│\x1b\[0m /, ''), cacheSeg]
       .filter(Boolean)
       .join(' \x1b[2m│\x1b[0m ');
 

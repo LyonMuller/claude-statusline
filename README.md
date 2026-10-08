@@ -3,13 +3,26 @@
 A lightweight, dependency-free status line for [Claude Code](https://claude.com/claude-code). Single Node.js script, no external packages, no plugin framework — just drop it in and point `settings.json` at it.
 
 ```
-Sonnet 5 │ workstation │ fix/create-op-token-cross-account ~1
-█████░░░░░ 50% │ $1.23 │ +42 -7
+Sonnet 5.5 medium │ workstation │ fix/create-op-token-cross-account ~1
+████░░░░░░ 40% /compact ou /clear │ $1.23 │ +42 -7 │ cache esfria em 3min
 ```
 
-**Line 1**: model name │ current in-progress todo (if any) │ working directory │ git branch, with `+N` staged (green) and `~N` modified (yellow) file counts
+**Line 1**: model name + reasoning effort │ current in-progress todo (if any) │ working directory │ git branch, with `+N` staged (green) and `~N` modified (yellow) file counts
 
-**Line 2**: context window usage meter (color-coded: green → yellow → orange → red) │ session cost in USD │ lines changed (`+added` / `-removed`)
+**Line 2**: context window usage meter │ session cost in USD │ lines changed (`+added` / `-removed`) │ prompt-cache alert (only when it matters)
+
+The meter uses the real share of the context window (`context_window.used_percentage`) and tells you what to do:
+
+| Used | Color | Hint |
+|---|---|---|
+| < 20% | green | none |
+| 20–35% | yellow | `considere /compact` |
+| 35–50% | orange | `/compact ou /clear` |
+| ≥ 50% | red, blinking | `/clear (antes /handoff)` |
+
+Each turn re-reads the whole context from cache, so long sessions cost more per message and answer worse past ~50%.
+
+The cache alert appears only when the prompt cache expires in 5 minutes or less (`cache esfria em Nmin`), or is already cold with 50k+ tokens to re-pay (`cache frio · 137k a repagar`).
 
 Every segment degrades gracefully — outside a git repo the branch segment disappears, before any cost data exists the `$` segment disappears, and so on. Nothing ever throws or breaks the status line.
 
@@ -46,7 +59,8 @@ Every segment degrades gracefully — outside a git repo the branch segment disa
 
 Everything lives in one file, `statusline.js`, with no build step:
 
-- **Context meter thresholds/colors** — edit the `used < 50 / 65 / 80` branches near the top of the `stdin.on('end', ...)` handler.
+- **Context meter thresholds/colors/hints** — `CTX_WARN_PCT`, `CTX_ACT_PCT` and `CTX_DUMB_PCT` at the top, and the branches in the `stdin.on('end', ...)` handler.
+- **Cache alert** — `getCacheAlert()`, `CACHE_WARN_SECONDS` and `CACHE_COLD_MIN_TOKENS`.
 - **Cost formatting** — `formatCost()`.
 - **Lines-changed formatting** — `formatLinesChanged()`.
 - **Git segment** (branch + staged/modified counts) — `getGitSegment()`.
